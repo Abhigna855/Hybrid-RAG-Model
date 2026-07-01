@@ -127,7 +127,7 @@ This figure compares the overall performance of the baseline, dense RAG, and hyb
 
 This figure shows how accuracy changes across the compared systems.
 
-![Accuracy Comparison]([images/accuracy_comparison.png](https://github.com/Abhigna855/Hybrid-RAG-Model/blob/main/05a413b6-4e22-4731-954c-d40d23ca8808.png?raw=true))
+![Accuracy Comparison](https://github.com/Abhigna855/Hybrid-RAG-Model/blob/main/05a413b6-4e22-4731-954c-d40d23ca8808.png?raw=true)
 
 ### 3. Latency Comparison
 
