@@ -133,7 +133,7 @@ This figure shows how accuracy changes across the compared systems.
 
 This figure compares the query response time of each approach.
 
-![Latency Comparison](images/latency_comparison.png)
+![Latency Comparison](https://github.com/Abhigna855/Hybrid-RAG-Model/blob/main/6b2d91d7-3b37-42dc-a3df-e7d13a0ce8d4.png?raw=true)
 
 ### 4. Retrieval Metrics
 
