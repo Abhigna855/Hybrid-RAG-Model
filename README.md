@@ -139,7 +139,7 @@ This figure compares the query response time of each approach.
 
 This figure presents retrieval-quality metrics such as ranking and relevance performance.
 
-![Retrieval Metrics](images/retrieval_metrics.png)
+![Retrieval Metrics](https://github.com/Abhigna855/Hybrid-RAG-Model/blob/main/562eb300-b847-4743-bb84-664ad06bf1bd.png?raw=true)
 
 ### 5. Generation Metrics
 
