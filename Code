@@ -1,1 +1,372 @@
+import pandas as pd
+import numpy as np
+import re
+import ast
+import time
+import matplotlib.pyplot as plt
+import seaborn as sns
 
+from datasets import load_dataset
+from sentence_transformers import SentenceTransformer
+from rank_bm25 import BM25Okapi
+import faiss
+
+from transformers import T5ForConditionalGeneration, T5Tokenizer
+from sklearn.model_selection import train_test_split
+
+from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
+from rouge_score import rouge_scorer
+from collections import Counter
+import math
+
+import logging
+logging.getLogger("transformers").setLevel(logging.ERROR)
+
+sns.set(style="whitegrid")
+
+# Load dataset
+dataset = load_dataset("qiaojin/PubMedQA", "pqa_labeled")
+df = dataset["train"].to_pandas()
+
+# Basic inspection
+df.head()
+df.shape
+df.columns
+df.isnull().sum()
+
+plt.figure(figsize=(6, 4))
+sns.countplot(x=df["final_decision"], order=df["final_decision"].value_counts().index)
+plt.title("Distribution of Final Decisions")
+plt.xlabel("Final Decision")
+plt.ylabel("Count")
+plt.tight_layout()
+plt.show()
+
+# Parse context
+def parse_context(context_val):
+    try:
+        if isinstance(context_val, dict):
+            context_json = context_val
+        else:
+            context_json = ast.literal_eval(str(context_val))
+
+        context_list = context_json.get("contexts", [])
+        labels = context_json.get("labels", [])
+        meshes = context_json.get("meshes", [])
+        full_text = " ".join(context_list)
+
+        return pd.Series([context_list, labels, meshes, full_text])
+    except Exception:
+        return pd.Series([[], [], [], ""])
+
+df[["context_list", "labels", "meshes", "context_text"]] = df["context"].apply(parse_context)
+
+# Clean text
+def clean_text(text):
+    text = re.sub(r"\n+", " ", str(text))
+    text = re.sub(r"[^a-zA-Z0-9\s]", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.lower().strip()
+
+df["clean_context"] = df["context_text"].apply(clean_text)
+df["clean_question"] = df["question"].apply(clean_text)
+
+documents = df["clean_context"].tolist()
+tokenized_corpus = [doc.split() for doc in documents]
+
+# Split data
+train_data, test_data = train_test_split(
+    df, test_size=0.2, random_state=42, stratify=df["final_decision"]
+)
+
+# Embeddings and indexes
+embed_model = SentenceTransformer("all-MiniLM-L6-v2")
+embeddings = embed_model.encode(documents, show_progress_bar=True).astype("float32")
+faiss.normalize_L2(embeddings)
+
+index = faiss.IndexFlatIP(embeddings.shape[1])
+index.add(embeddings)
+
+bm25 = BM25Okapi(tokenized_corpus)
+
+# Retrieval functions
+def dense_search(query, top_k=5):
+    query_emb = embed_model.encode([query]).astype("float32")
+    faiss.normalize_L2(query_emb)
+    scores, indices = index.search(query_emb, top_k)
+    return indices[0].tolist()
+
+def bm25_search(query, top_k=5):
+    scores = bm25.get_scores(query.split())
+    return np.argsort(scores)[::-1][:top_k].tolist()
+
+def reciprocal_rank_fusion(bm25_ids, dense_ids, k=60):
+    scores = {}
+    for rank, doc_id in enumerate(bm25_ids):
+        scores[doc_id] = scores.get(doc_id, 0) + 1 / (k + rank + 1)
+    for rank, doc_id in enumerate(dense_ids):
+        scores[doc_id] = scores.get(doc_id, 0) + 1 / (k + rank + 1)
+
+    ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    return [doc_id for doc_id, _ in ranked]
+
+def hybrid_search(query, top_k=5):
+    cleaned_query = clean_text(query)
+    dense_ids = dense_search(cleaned_query, top_k * 2)
+    bm25_ids = bm25_search(cleaned_query, top_k * 2)
+    fused_ids = reciprocal_rank_fusion(bm25_ids, dense_ids)
+    return fused_ids[:top_k]
+
+def build_context(doc_ids):
+    return "\n".join([documents[i] for i in doc_ids])
+
+# Load generation model
+t5_tokenizer = T5Tokenizer.from_pretrained("google/flan-t5-base")
+t5_model = T5ForConditionalGeneration.from_pretrained("google/flan-t5-base")
+
+def generate_answer(query, context):
+    prompt = f"""Answer the question with yes, no, or maybe.
+
+Context:
+{context}
+
+Question:
+{query}
+
+Answer:"""
+    inputs = t5_tokenizer(prompt, return_tensors="pt", truncation=True, max_length=512)
+    outputs = t5_model.generate(**inputs, max_new_tokens=20)
+    response = t5_tokenizer.decode(outputs[0], skip_special_tokens=True)
+    return response.strip()
+
+# Systems
+def baseline_system(query):
+    return generate_answer(query, "")
+
+def dense_rag(query):
+    ids = dense_search(clean_text(query))
+    context = build_context(ids)
+    return generate_answer(query, context)
+
+def hybrid_rag(query):
+    ids = hybrid_search(query)
+    context = build_context(ids)
+    return generate_answer(query, context)
+
+# Label extraction
+def extract_label(text):
+    text = str(text).lower().strip()
+    if "yes" in text:
+        return "yes"
+    elif "no" in text:
+        return "no"
+    else:
+        return "maybe"
+
+# System evaluation
+def evaluate_system(system_func, data_sample):
+    results = []
+
+    for _, row in data_sample.iterrows():
+        query = row["clean_question"]
+        true_label = str(row["final_decision"]).lower().strip()
+
+        start = time.time()
+        response = system_func(query)
+        pred_label = extract_label(response)
+        latency = time.time() - start
+
+        results.append({
+            "correct": pred_label == true_label,
+            "latency": latency
+        })
+
+    return pd.DataFrame(results)
+
+# Compare systems
+sample_data = test_data.sample(min(50, len(test_data)), random_state=42)
+
+baseline_results = evaluate_system(baseline_system, sample_data)
+dense_results = evaluate_system(dense_rag, sample_data)
+hybrid_results = evaluate_system(hybrid_rag, sample_data)
+
+def compute_metrics(result_df):
+    accuracy = result_df["correct"].mean()
+    latency = result_df["latency"].mean()
+    return accuracy, latency
+
+baseline_acc, baseline_lat = compute_metrics(baseline_results)
+dense_acc, dense_lat = compute_metrics(dense_results)
+hybrid_acc, hybrid_lat = compute_metrics(hybrid_results)
+
+comparison = pd.DataFrame({
+    "System": ["Baseline", "Dense RAG", "Hybrid RAG"],
+    "Accuracy": [baseline_acc, dense_acc, hybrid_acc],
+    "Latency": [baseline_lat, dense_lat, hybrid_lat]
+})
+
+print(comparison)
+
+plt.figure(figsize=(7, 4))
+comparison.set_index("System")["Accuracy"].plot(kind="bar", color=["gray", "steelblue", "seagreen"])
+plt.title("Accuracy Comparison")
+plt.ylabel("Accuracy")
+plt.ylim(0, 1)
+plt.tight_layout()
+plt.show()
+
+plt.figure(figsize=(7, 4))
+comparison.set_index("System")["Latency"].plot(kind="bar", color=["gray", "steelblue", "seagreen"])
+plt.title("Latency Comparison")
+plt.ylabel("Seconds")
+plt.tight_layout()
+plt.show()
+
+# Retrieval and generation metrics
+def precision_at_k(retrieved_ids, relevant_ids, k):
+    retrieved_k = retrieved_ids[:k]
+    if k == 0:
+        return 0
+    return len(set(retrieved_k) & set(relevant_ids)) / k
+
+def recall_at_k(retrieved_ids, relevant_ids, k):
+    retrieved_k = retrieved_ids[:k]
+    if len(relevant_ids) == 0:
+        return 0
+    return len(set(retrieved_k) & set(relevant_ids)) / len(relevant_ids)
+
+def mean_reciprocal_rank(retrieved_ids, relevant_ids):
+    for rank, doc_id in enumerate(retrieved_ids, start=1):
+        if doc_id in relevant_ids:
+            return 1 / rank
+    return 0
+
+def dcg(retrieved_ids, relevant_ids, k):
+    score = 0
+    for i, doc_id in enumerate(retrieved_ids[:k]):
+        if doc_id in relevant_ids:
+            score += 1 / math.log2(i + 2)
+    return score
+
+def ndcg(retrieved_ids, relevant_ids, k):
+    ideal = dcg(relevant_ids, relevant_ids, k)
+    if ideal == 0:
+        return 0
+    return dcg(retrieved_ids, relevant_ids, k) / ideal
+
+def exact_match(pred, truth):
+    return int(str(pred).strip().lower() == str(truth).strip().lower())
+
+def f1_score_fn(pred, truth):
+    pred_tokens = str(pred).split()
+    truth_tokens = str(truth).split()
+    common = Counter(pred_tokens) & Counter(truth_tokens)
+    num_same = sum(common.values())
+
+    if num_same == 0:
+        return 0
+
+    precision = num_same / len(pred_tokens)
+    recall = num_same / len(truth_tokens)
+    return 2 * precision * recall / (precision + recall)
+
+def bleu_score_fn(pred, truth):
+    smoothie = SmoothingFunction().method1
+    return sentence_bleu([str(truth).split()], str(pred).split(), smoothing_function=smoothie)
+
+def rouge_score_fn(pred, truth):
+    scorer = rouge_scorer.RougeScorer(["rouge1", "rougeL"], use_stemmer=True)
+    return scorer.score(str(truth), str(pred))
+
+# Full evaluation
+results = []
+
+for _, row in test_data.head(50).iterrows():
+    query = row["clean_question"]
+    true_answer = str(row["final_decision"]).lower().strip()
+
+    dense_ids = dense_search(query, top_k=5)
+    bm25_ids = bm25_search(query, top_k=5)
+    hybrid_ids = reciprocal_rank_fusion(bm25_ids, dense_ids)
+
+    relevant_ids = [row.name]
+
+    p = precision_at_k(hybrid_ids, relevant_ids, 5)
+    r = recall_at_k(hybrid_ids, relevant_ids, 5)
+    mrr = mean_reciprocal_rank(hybrid_ids, relevant_ids)
+    nd = ndcg(hybrid_ids, relevant_ids, 5)
+
+    context = build_context(hybrid_ids[:5])
+    pred_answer = extract_label(generate_answer(query, context))
+
+    em = exact_match(pred_answer, true_answer)
+    f1 = f1_score_fn(pred_answer, true_answer)
+    bleu = bleu_score_fn(pred_answer, true_answer)
+    rouge = rouge_score_fn(pred_answer, true_answer)
+
+    start_time = time.time()
+    _ = generate_answer(query, context)
+    latency = time.time() - start_time
+
+    results.append({
+        "precision": p,
+        "recall": r,
+        "mrr": mrr,
+        "ndcg": nd,
+        "em": em,
+        "f1": f1,
+        "bleu": bleu,
+        "rouge1": rouge["rouge1"].fmeasure,
+        "rougeL": rouge["rougeL"].fmeasure,
+        "latency": latency
+    })
+
+results_df = pd.DataFrame(results)
+print(results_df.mean(numeric_only=True))
+
+plt.figure(figsize=(7, 4))
+results_df[["precision", "recall", "mrr", "ndcg"]].mean().plot(kind="bar", color="steelblue")
+plt.title("Retrieval Metrics")
+plt.ylabel("Score")
+plt.ylim(0, 1)
+plt.tight_layout()
+plt.show()
+
+plt.figure(figsize=(7, 4))
+results_df[["em", "f1", "bleu", "rouge1", "rougeL"]].mean().plot(kind="bar", color="coral")
+plt.title("Generation Metrics")
+plt.ylabel("Score")
+plt.ylim(0, 1)
+plt.tight_layout()
+plt.show()
+
+plt.figure(figsize=(8, 4))
+plt.hist(results_df["latency"], bins=15, color="steelblue", edgecolor="black")
+plt.title("Query Latency Distribution")
+plt.xlabel("Latency (sec)")
+plt.ylabel("Count")
+plt.tight_layout()
+plt.show()
+
+print(f"Mean latency: {results_df['latency'].mean():.2f}s | Max: {results_df['latency'].max():.2f}s")
+
+# Interactive query
+def ask_question(query, top_k=5):
+    print("\nUser Query:")
+    print(query)
+
+    retrieved_ids = hybrid_search(query, top_k)
+    context = build_context(retrieved_ids)
+    response = generate_answer(query, context)
+    final_decision = extract_label(response)
+
+    print("\nRetrieved Context (Top-K):")
+    print(context[:500], "...")
+    print("\nLLM Response:")
+    print(response)
+    print("\nFinal Decision:")
+    print(final_decision.upper())
+
+    return final_decision, response
+
+ask_question("Does ice cream affect health?")
