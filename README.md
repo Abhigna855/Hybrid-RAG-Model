@@ -284,6 +284,6 @@ The notebook includes:
 
 ## Author
 
-**Your Name**  
+**Abhigna Korapala**  
 MSc Artificial Intelligence  
 University Dissertation Project
