@@ -151,7 +151,7 @@ This figure shows answer-quality metrics for the generated responses.
 
 This figure shows the spread of response latencies across the evaluated systems.
 
-![Latency Distribution](images/latency_distribution.png)
+![Latency Distribution](https://github.com/Abhigna855/Hybrid-RAG-Model/blob/main/a33fec0a-55f3-4481-9069-59df414e89fd.png?raw=true)
 
 ---
 
