@@ -121,7 +121,7 @@ The repository includes the following result figures:
 
 This figure compares the overall performance of the baseline, dense RAG, and hybrid RAG systems.
 
-![Performance Comparison](images/performance_comparison.png)
+![Performance Comparison](https://github.com/Abhigna855/Hybrid-RAG-Model/blob/main/b2158876-ed57-42af-968f-fe5eebda4a12.png?raw=true)
 
 ### 2. Accuracy Comparison
 
