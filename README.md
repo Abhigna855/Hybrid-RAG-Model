@@ -145,7 +145,7 @@ This figure presents retrieval-quality metrics such as ranking and relevance per
 
 This figure shows answer-quality metrics for the generated responses.
 
-![Generation Metrics](images/generation_metrics.png)
+![Generation Metrics](https://github.com/Abhigna855/Hybrid-RAG-Model/blob/main/13d5a10d-c55e-4d37-a858-fe4d5ddc1028.png?raw=true)
 
 ### 6. Latency Distribution
 
